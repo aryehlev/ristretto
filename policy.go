@@ -22,6 +22,7 @@ import (
 	"sync/atomic"
 
 	"github.com/dgraph-io/ristretto/z"
+	lru "github.com/golang/groupcache/lru"
 )
 
 const (
@@ -286,17 +287,53 @@ type sampledLFU struct {
 	// for 64-bit alignment of 64-bit words accessed atomically.
 	// The first word in a variable or in an allocated struct, array,
 	// or slice can be relied upon to be 64-bit aligned."
-	maxCost  int64
-	used     int64
-	metrics  *Metrics
-	keyCosts map[uint64]int64
+	maxCost   int64
+	used      int64
+	metrics   *Metrics
+	keyCosts2 *List[A]
+	keyCosts  map[uint64]int64
+}
+type A struct {
+	key uint64
+	val uint64
+}
+
+type tinyLFUEvict struct {
+	lru     *lru.Cache
+	lru2    *lru.Cache
+	maxCost int64
+	used    int64
+}
+
+func newtinyLFUEvict(maxCost int64) *tinyLFUEvict {
+	return &tinyLFUEvict{
+		maxCost: maxCost,
+		lru:     lru.New(int(maxCost)),
+		lru2:    lru.New(int(maxCost)),
+	}
 }
 
 func newSampledLFU(maxCost int64) *sampledLFU {
 	return &sampledLFU{
 		keyCosts: make(map[uint64]int64),
-		maxCost:  maxCost,
+		keyCosts2: NewList[struct {
+			1 uint64
+			2 uint64
+		}](),
+		maxCost: maxCost,
 	}
+}
+
+func (p *tinyLFUEvict) getMaxCost() int64 {
+	return atomic.LoadInt64(&p.maxCost)
+}
+
+func (p *tinyLFUEvict) updateMaxCost(maxCost int64) {
+	atomic.StoreInt64(&p.maxCost, maxCost)
+}
+
+func (p *tinyLFUEvict) roomLeft(cost int64) int64 {
+	return p.getMaxCost() - (p.used + cost)
 }
 
 func (p *sampledLFU) getMaxCost() int64 {
@@ -310,7 +347,18 @@ func (p *sampledLFU) updateMaxCost(maxCost int64) {
 func (p *sampledLFU) roomLeft(cost int64) int64 {
 	return p.getMaxCost() - (p.used + cost)
 }
-
+func (p *tinyLFUEvict) fillSample(in []*policyPair) []*policyPair {
+	if len(in) >= lfuSample {
+		return in
+	}
+	//for key, cost := range p.keyCosts {
+	in = append(in, &policyPair{p.lru.RemoveOldest(), cost})
+	//	if len(in) >= lfuSample {
+	//		return in
+	//	}
+	////}
+	return in
+}
 func (p *sampledLFU) fillSample(in []*policyPair) []*policyPair {
 	if len(in) >= lfuSample {
 		return in
